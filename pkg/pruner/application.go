@@ -7,11 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	cdb "github.com/cometbft/cometbft-db"
-	"github.com/cometbft/cometbft/libs/log"
-	storeiavl "github.com/cosmos/cosmos-sdk/store/iavl"
-	"github.com/cosmos/cosmos-sdk/store/rootmulti"
-	storetypes "github.com/cosmos/cosmos-sdk/store/types"
+	"cosmossdk.io/log"
+	storeiavl "cosmossdk.io/store/iavl"
+	"cosmossdk.io/store/metrics"
+	"cosmossdk.io/store/rootmulti"
+	storetypes "cosmossdk.io/store/types"
+	cdb "github.com/cosmos/cosmos-db"
 	"github.com/cosmos/iavl"
 )
 
@@ -20,7 +21,7 @@ func PruneApplicationDB(dataDir string) error {
 	if _, err := os.Stat(filepath.Join(dataDir, "application.db")); os.IsNotExist(err) {
 		return fmt.Errorf("application.db does not exist in %s", dataDir)
 	}
-	cdbOld, err := cdb.NewGoLevelDB("application", dataDir)
+	cdbOld, err := cdb.NewGoLevelDB("application", dataDir, nil)
 	if err != nil {
 		return err
 	}
@@ -29,14 +30,14 @@ func PruneApplicationDB(dataDir string) error {
 	latestHeight := rootmulti.GetLatestVersion(cdbOld)
 
 	// Get all module keys
-	storeOld := rootmulti.NewStore(cdbOld, log.NewNopLogger())
+	storeOld := rootmulti.NewStore(cdbOld, log.NewNopLogger(), metrics.NewNoOpMetrics())
 	commitInfo, err := storeOld.GetCommitInfo(latestHeight)
 	if err != nil {
 		return err
 	}
 	storeKeys := []*storetypes.KVStoreKey{}
 	for _, info := range commitInfo.StoreInfos {
-		// Skip stores that are not of type `sdk.StoreTypeIAVL`
+		// Skip stores that are not of type sdk.StoreTypeIAVL
 		if strings.HasPrefix(info.Name, "mem_") {
 			continue
 		}
@@ -55,11 +56,11 @@ func PruneApplicationDB(dataDir string) error {
 	if err := os.RemoveAll(filepath.Join(dataDir, "application.new.db")); err != nil {
 		return err
 	}
-	cdbNew, err := cdb.NewGoLevelDB("application.new", dataDir)
+	cdbNew, err := cdb.NewGoLevelDB("application.new", dataDir, nil)
 	if err != nil {
 		return err
 	}
-	storeNew := rootmulti.NewStore(cdbNew, log.NewNopLogger())
+	storeNew := rootmulti.NewStore(cdbNew, log.NewNopLogger(), metrics.NewNoOpMetrics())
 	for _, storeKey := range storeKeys {
 		storeNew.MountStoreWithDB(storeKey, storetypes.StoreTypeIAVL, nil)
 	}
@@ -75,7 +76,7 @@ func PruneApplicationDB(dataDir string) error {
 			binaryHeight := make([]byte, 8)
 			binary.BigEndian.PutUint64(binaryHeight, uint64(latestHeight))
 			key := append([]byte("s/k:"+storeKey.Name()+"/r"), binaryHeight...)
-			if err := cdbNew.SetSync(key, []byte{}); err != nil {
+			if err := cdbNew.Set(key, []byte{}); err != nil {
 				return err
 			}
 			continue
@@ -104,12 +105,12 @@ func PruneApplicationDB(dataDir string) error {
 	if err != nil {
 		return err
 	}
-	cdbNew.SetSync([]byte("s/latest"), val)
+	cdbNew.Set([]byte("s/latest"), val)
 	val, err = commitInfo.Marshal()
 	if err != nil {
 		return err
 	}
-	cdbNew.SetSync([]byte("s/"+fmt.Sprint(latestHeight)), val)
+	cdbNew.Set([]byte("s/"+fmt.Sprint(latestHeight)), val)
 
 	// Remove old db and rename new db
 	if err := cdbOld.Close(); err != nil {
