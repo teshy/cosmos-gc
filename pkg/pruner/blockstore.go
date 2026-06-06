@@ -7,10 +7,11 @@ import (
 	"strings"
 
 	cdb "github.com/cometbft/cometbft-db"
+	cmtstore "github.com/cometbft/cometbft/proto/tendermint/store"
 	"github.com/cometbft/cometbft/store"
 )
 
-func PruneBlockstoreDB(dataDir string) error {
+func PruneBlockstoreDB(dataDir string, committedHeight int64) error {
 	// Open old db (if it exists)
 	if _, err := os.Stat(filepath.Join(dataDir, "blockstore.db")); os.IsNotExist(err) {
 		return fmt.Errorf("blockstore.db does not exist in %s", dataDir)
@@ -20,9 +21,17 @@ func PruneBlockstoreDB(dataDir string) error {
 		return err
 	}
 
-	// Get latest height
+	// Get latest height, CAPPED to the committed app/state height. The blockstore can sit one
+	// block AHEAD of the committed app state (the normal transient at shutdown). Keeping that
+	// trailing block makes the node replay it on restart, which panics on chains whose
+	// BeginBlocker validates against pruned state (e.g. a multistaking module checking validator
+	// records: "validator does not exist"), and leaves store > state on chains that don't panic.
+	// Capping to the committed height makes store == state == app on restart → no replay → clean boot.
 	blockStore := store.NewBlockStore(dbOld)
 	latestHeight := blockStore.Height()
+	if committedHeight > 0 && committedHeight < latestHeight {
+		latestHeight = committedHeight
+	}
 
 	// Get blockhash of latest height
 	meta := blockStore.LoadBlockMeta(latestHeight)
@@ -70,7 +79,12 @@ func PruneBlockstoreDB(dataDir string) error {
 	if err != nil {
 		return err
 	}
-	blockstoreVal, err = dbOld.Get(blockstoreKey)
+	// Write a FRESH BlockStoreState meta reflecting the (possibly capped) single retained height,
+	// instead of copying the old meta. Copying the old meta would report the pre-cap height and
+	// re-introduce the "store ahead of state" replay. With base == height == latestHeight the
+	// store reports exactly the one retained block; the node blocksyncs forward from there.
+	bss := cmtstore.BlockStoreState{Base: latestHeight, Height: latestHeight}
+	blockstoreVal, err = bss.Marshal()
 	if err != nil {
 		return err
 	}
