@@ -7,10 +7,11 @@ import (
 	"strings"
 
 	cdb "github.com/cometbft/cometbft-db"
+	cmtstore "github.com/cometbft/cometbft/proto/tendermint/store"
 	"github.com/cometbft/cometbft/store"
 )
 
-func PruneBlockstoreDB(dataDir string) error {
+func PruneBlockstoreDB(dataDir string, committedHeight int64) error {
 	// Open old db (if it exists)
 	if _, err := os.Stat(filepath.Join(dataDir, "blockstore.db")); os.IsNotExist(err) {
 		return fmt.Errorf("blockstore.db does not exist in %s", dataDir)
@@ -20,9 +21,18 @@ func PruneBlockstoreDB(dataDir string) error {
 		return err
 	}
 
-	// Get latest height
+	// Get latest height, capped to the committed app/state height.
+	// The blockstore can sit one block AHEAD of the committed app state — the normal transient at
+	// shutdown when the engine has staged the next block but not yet committed it. Pruning to
+	// blockStore.Height() in that case retains the uncommitted trailing block, forcing the node
+	// to replay it on restart. Chains whose BeginBlocker validates state that was also pruned
+	// (e.g. validator records) will panic on that replay. Capping to committedHeight ensures
+	// store == state == app on restart → no replay → clean boot on any chain.
 	blockStore := store.NewBlockStore(dbOld)
 	latestHeight := blockStore.Height()
+	if committedHeight > 0 && committedHeight < latestHeight {
+		latestHeight = committedHeight
+	}
 
 	// Get blockhash of latest height
 	meta := blockStore.LoadBlockMeta(latestHeight)
@@ -70,7 +80,12 @@ func PruneBlockstoreDB(dataDir string) error {
 	if err != nil {
 		return err
 	}
-	blockstoreVal, err = dbOld.Get(blockstoreKey)
+	// Write a fresh BlockStoreState reflecting the (possibly capped) retained height, rather than
+	// copying the old meta. The old meta records the pre-cap height; copying it would re-introduce
+	// the "store ahead of state" condition. With Base == Height == latestHeight the store reports
+	// exactly the one retained block; the node block-syncs forward from there.
+	bss := cmtstore.BlockStoreState{Base: latestHeight, Height: latestHeight}
+	blockstoreVal, err = bss.Marshal()
 	if err != nil {
 		return err
 	}
