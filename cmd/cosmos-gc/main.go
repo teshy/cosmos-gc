@@ -18,13 +18,23 @@ func main() {
 	dataDir := filepath.Join(appHome, "data")
 	fmt.Printf("Using app data dir at [%v]\n", dataDir)
 
+	// Determine the committed block height BEFORE the concurrent pruners open their DBs, so the
+	// blockstore prune can be capped to it — never retaining a block ahead of the committed app
+	// state (which would force an unreplayable trailing-block replay on restart).
+	committedHeight, err := pruner.GetCommittedHeight(dataDir)
+	if err != nil {
+		fmt.Printf("failed to read committed height from state.db: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("committed height (blockstore prune cap): %d\n", committedHeight)
+
 	wg := sync.WaitGroup{}
 	wg.Add(3)
 
 	go func() {
 		defer wg.Done()
 		fmt.Println("[blockstore] starting to prune...")
-		if err := pruner.PruneBlockstoreDB(dataDir); err != nil {
+		if err := pruner.PruneBlockstoreDB(dataDir, committedHeight); err != nil {
 			fmt.Printf("[blockstore] pruning failed: %v\n", err)
 			return
 		}
