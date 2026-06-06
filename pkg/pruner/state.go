@@ -81,3 +81,20 @@ func PruneStateDB(dataDir string) error {
 
 	return nil
 }
+
+// GetCommittedHeight returns state.db's LastBlockHeight (the committed consensus/app height).
+// Used to cap the blockstore prune so it never retains a block ahead of the committed app state.
+// Call BEFORE the concurrent pruners run — it opens state.db read-only and closes it, avoiding a
+// goleveldb lock conflict with PruneStateDB.
+func GetCommittedHeight(dataDir string) (int64, error) {
+	db, err := cdb.NewGoLevelDB("state", dataDir)
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	st, err := state.NewStore(db, state.StoreOptions{}).Load()
+	if err != nil {
+		return 0, err
+	}
+	return st.LastBlockHeight, nil
+}
