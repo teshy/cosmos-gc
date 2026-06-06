@@ -45,13 +45,16 @@ func PruneBlockstoreDB(dataDir string, committedHeight int64) error {
 	if err != nil {
 		return err
 	}
+	numParts := int(meta.BlockID.PartSetHeader.Total)
+	if numParts == 0 {
+		numParts = 1 // always copy at least part 0
+	}
+
 	var (
 		hKey          []byte = []byte("H:" + fmt.Sprint(latestHeight))
 		hVal          []byte
 		cKey          []byte = []byte("C:" + fmt.Sprint(latestHeight-1))
 		cVal          []byte
-		pKey          []byte = []byte("P:" + fmt.Sprint(latestHeight) + ":0")
-		pVal          []byte
 		scKey         []byte = []byte("SC:" + fmt.Sprint(latestHeight))
 		scVal         []byte
 		bhKey         []byte = []byte("BH:" + latestHash)
@@ -64,10 +67,6 @@ func PruneBlockstoreDB(dataDir string, committedHeight int64) error {
 		return err
 	}
 	cVal, err = dbOld.Get(cKey)
-	if err != nil {
-		return err
-	}
-	pVal, err = dbOld.Get(pKey)
 	if err != nil {
 		return err
 	}
@@ -91,7 +90,24 @@ func PruneBlockstoreDB(dataDir string, committedHeight int64) error {
 	batch := dbNew.NewBatch()
 	batch.Set(hKey, hVal)
 	batch.Set(cKey, cVal)
-	batch.Set(pKey, pVal)
+	// Copy all block parts — blocks with many transactions have more than one part.
+	// The original code hardcoded P:N:0 and silently dropped parts 1+ on large blocks.
+	for i := 0; i < numParts; i++ {
+		pKey := []byte(fmt.Sprintf("P:%d:%d", latestHeight, i))
+		pVal, err := dbOld.Get(pKey)
+		if err != nil {
+			return err
+		}
+		if pVal == nil {
+			// numParts comes from the block meta's PartSetHeader.Total, so every index in
+			// [0,numParts) must exist in the source DB. A nil here means the source is missing a
+			// declared part (corruption, or a prior buggy GC) — fail loudly rather than silently
+			// write an incomplete, unreadable retained block, which is the very failure this fix
+			// exists to prevent.
+			return fmt.Errorf("block %d: part %d of %d is missing from the source blockstore — refusing to write an incomplete block", latestHeight, i, numParts)
+		}
+		batch.Set(pKey, pVal)
+	}
 	batch.Set(scKey, scVal)
 	batch.Set(bhKey, bhVal)
 	batch.Set(blockstoreKey, blockstoreVal)
