@@ -23,10 +23,10 @@ func PruneBlockstoreDB(dataDir string, committedHeight int64) error {
 
 	// Get latest height, CAPPED to the committed app/state height. The blockstore can sit one
 	// block AHEAD of the committed app state (the normal transient at shutdown). Keeping that
-	// trailing block makes the node replay it on restart, which panics on this chain's
-	// BeginBlocker ("validator does not exist") because the GC'd state lacks the validator
-	// records the replay needs. Capping to the committed height makes store == state == app on
-	// restart → no replay → clean boot. (Realio fork fix, 2026-06-06.)
+	// trailing block makes the node replay it on restart, which panics on chains whose
+	// BeginBlocker validates against pruned state (e.g. a multistaking module checking validator
+	// records: "validator does not exist"), and leaves store > state on chains that don't panic.
+	// Capping to the committed height makes store == state == app on restart → no replay → clean boot.
 	blockStore := store.NewBlockStore(dbOld)
 	latestHeight := blockStore.Height()
 	if committedHeight > 0 && committedHeight < latestHeight {
