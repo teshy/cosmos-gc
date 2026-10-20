@@ -2,7 +2,6 @@ package pruner
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,6 +78,9 @@ func TestPruneBlockstoreDB_AllParts(t *testing.T) {
 		t.Fatalf("PruneBlockstoreDB: %v", err)
 	}
 
+	if _, err := os.Stat(filepath.Join(dir, "blockstore.new.db")); !os.IsNotExist(err) {
+		t.Errorf("blockstore.new.db still exists after a successful prune (stat err=%v)", err)
+	}
 	db, err := cdb.NewGoLevelDB("blockstore", dir)
 	if err != nil {
 		t.Fatal(err)
@@ -122,17 +124,18 @@ func TestPruneBlockstoreDB_MissingPart(t *testing.T) {
 		t.Errorf("error %q does not name the missing part", err)
 	}
 
-	// The function must return before "Remove old db and rename new db": the source is still there
-	// and still holds the parts that were present. PruneBlockstoreDB returns on this path with the
-	// source DB handle still open, so the check opens a file-level copy of the directory.
+	// The function must return before "Remove old db and rename new db", and must clean up on the
+	// way out: the source is still there, unlocked (it reopens in this process) and still holds the
+	// parts that were present, and no half-written new DB is left beside it.
 	if _, err := os.Stat(filepath.Join(dir, "blockstore.db")); err != nil {
 		t.Fatalf("source blockstore.db is gone after the failed prune: %v", err)
 	}
-	cp := t.TempDir()
-	copyTree(t, filepath.Join(dir, "blockstore.db"), filepath.Join(cp, "blockstore.db"))
-	src, err := cdb.NewGoLevelDB("blockstore", cp)
+	if _, err := os.Stat(filepath.Join(dir, "blockstore.new.db")); !os.IsNotExist(err) {
+		t.Errorf("blockstore.new.db is left behind after the failed prune (stat err=%v)", err)
+	}
+	src, err := cdb.NewGoLevelDB("blockstore", dir)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("source DB cannot be reopened after the failed prune: %v", err)
 	}
 	defer src.Close()
 	if v, err := src.Get(partKey(0)); err != nil || v == nil {
@@ -160,33 +163,5 @@ func TestPruneBlockstoreDB_SinglePart(t *testing.T) {
 	defer db.Close()
 	if bs := store.NewBlockStore(db); bs.LoadBlock(testHeight) == nil {
 		t.Errorf("LoadBlock(%d) is nil after the prune", testHeight)
-	}
-}
-
-func copyTree(t *testing.T, from, to string) {
-	t.Helper()
-	if err := os.MkdirAll(to, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	entries, err := os.ReadDir(from)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range entries {
-		in, err := os.Open(filepath.Join(from, e.Name()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		out, err := os.Create(filepath.Join(to, e.Name()))
-		if err != nil {
-			in.Close()
-			t.Fatal(err)
-		}
-		_, err = io.Copy(out, in)
-		in.Close()
-		out.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
 	}
 }

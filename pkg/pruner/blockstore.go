@@ -1,6 +1,7 @@
 package pruner
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,7 +12,7 @@ import (
 	"github.com/cometbft/cometbft/store"
 )
 
-func PruneBlockstoreDB(dataDir string, committedHeight int64) error {
+func PruneBlockstoreDB(dataDir string, committedHeight int64) (retErr error) {
 	// Open old db (if it exists)
 	if _, err := os.Stat(filepath.Join(dataDir, "blockstore.db")); os.IsNotExist(err) {
 		return fmt.Errorf("blockstore.db does not exist in %s", dataDir)
@@ -20,6 +21,44 @@ func PruneBlockstoreDB(dataDir string, committedHeight int64) error {
 	if err != nil {
 		return err
 	}
+
+	// On any error return, close what was opened and remove the half-written new DB, so the source
+	// stays unlocked and untouched. The success path below closes both itself; the closed flags keep
+	// this from closing twice. Once the old DB is about to be removed (swapping) the new DB may be
+	// the only complete copy, so it is left in place from there on. The original error is returned
+	// (joined with any cleanup error).
+	var (
+		dbNew     *cdb.GoLevelDB
+		closedOld bool
+		closedNew bool
+		swapping  bool
+	)
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		errs := []error{retErr}
+		if !closedOld {
+			if err := dbOld.Close(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if dbNew != nil {
+			if !closedNew {
+				if err := dbNew.Close(); err != nil {
+					errs = append(errs, err)
+				}
+			}
+			if !swapping {
+				if err := os.RemoveAll(filepath.Join(dataDir, "blockstore.new.db")); err != nil {
+					errs = append(errs, err)
+				}
+			}
+		}
+		if len(errs) > 1 {
+			retErr = errors.Join(errs...)
+		}
+	}()
 
 	// Get latest height, CAPPED to the committed app/state height. The blockstore can sit one
 	// block AHEAD of the committed app state (the normal transient at shutdown). Keeping that
@@ -41,7 +80,7 @@ func PruneBlockstoreDB(dataDir string, committedHeight int64) error {
 	if err := os.RemoveAll(filepath.Join(dataDir, "blockstore.new.db")); err != nil {
 		return err
 	}
-	dbNew, err := cdb.NewGoLevelDB("blockstore.new", dataDir)
+	dbNew, err = cdb.NewGoLevelDB("blockstore.new", dataDir)
 	if err != nil {
 		return err
 	}
@@ -119,12 +158,15 @@ func PruneBlockstoreDB(dataDir string, committedHeight int64) error {
 	}
 
 	// Remove old db and rename new db
+	closedOld = true
 	if err := dbOld.Close(); err != nil {
 		return err
 	}
+	closedNew = true
 	if err := dbNew.Close(); err != nil {
 		return err
 	}
+	swapping = true
 	if err := os.RemoveAll(filepath.Join(dataDir, "blockstore.db")); err != nil {
 		return err
 	}
