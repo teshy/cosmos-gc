@@ -24,7 +24,7 @@ func PruneBlockstoreDB(dataDir string, committedHeight int64) error {
 	// Get latest height, CAPPED to the committed app/state height. The blockstore can sit one
 	// block AHEAD of the committed app state (the normal transient at shutdown). Keeping that
 	// trailing block makes the node replay it on restart, which panics on chains whose
-	// BeginBlocker validates against pruned state (e.g. a multistaking module checking validator
+	// BeginBlocker validates against pruned state (e.g. a staking module checking validator
 	// records: "validator does not exist"), and leaves store > state on chains that don't panic.
 	// Capping to the committed height makes store == state == app on restart → no replay → clean boot.
 	blockStore := store.NewBlockStore(dbOld)
@@ -98,9 +98,15 @@ func PruneBlockstoreDB(dataDir string, committedHeight int64) error {
 		if err != nil {
 			return err
 		}
-		if pVal != nil {
-			batch.Set(pKey, pVal)
+		if pVal == nil {
+			// numParts comes from the block meta's PartSetHeader.Total, so every index in
+			// [0,numParts) must exist in the source DB. A nil here means the source is missing a
+			// declared part (corruption, or a prior buggy GC) — fail loudly rather than silently
+			// write an incomplete, unreadable retained block, which is the very failure this fix
+			// exists to prevent.
+			return fmt.Errorf("block %d: part %d of %d is missing from the source blockstore — refusing to write an incomplete block", latestHeight, i, numParts)
 		}
+		batch.Set(pKey, pVal)
 	}
 	batch.Set(scKey, scVal)
 	batch.Set(bhKey, bhVal)
