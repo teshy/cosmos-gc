@@ -1,6 +1,7 @@
 package pruner
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,7 +11,7 @@ import (
 	"github.com/cometbft/cometbft/state"
 )
 
-func PruneStateDB(dataDir string) error {
+func PruneStateDB(dataDir string) (retErr error) {
 	// Open old db (if it exists)
 	if _, err := os.Stat(filepath.Join(dataDir, "state.db")); os.IsNotExist(err) {
 		return fmt.Errorf("state.db does not exist in %s", dataDir)
@@ -19,6 +20,44 @@ func PruneStateDB(dataDir string) error {
 	if err != nil {
 		return err
 	}
+
+	// On any error return, close what was opened and remove the half-written new DB, so the source
+	// stays unlocked and untouched. The success path below closes both itself; the closed flags keep
+	// this from closing twice. Once the old DB is about to be removed (swapping) the new DB may be
+	// the only complete copy, so it is left in place from there on. The original error is returned
+	// (joined with any cleanup error).
+	var (
+		dbNew     *cdb.GoLevelDB
+		closedOld bool
+		closedNew bool
+		swapping  bool
+	)
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		errs := []error{retErr}
+		if !closedOld {
+			if err := dbOld.Close(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if dbNew != nil {
+			if !closedNew {
+				if err := dbNew.Close(); err != nil {
+					errs = append(errs, err)
+				}
+			}
+			if !swapping {
+				if err := os.RemoveAll(filepath.Join(dataDir, "state.new.db")); err != nil {
+					errs = append(errs, err)
+				}
+			}
+		}
+		if len(errs) > 1 {
+			retErr = errors.Join(errs...)
+		}
+	}()
 
 	// Get the important heights
 	storeOld := state.NewStore(dbOld, state.StoreOptions{})
@@ -48,7 +87,7 @@ func PruneStateDB(dataDir string) error {
 	if err := os.RemoveAll(filepath.Join(dataDir, "state.new.db")); err != nil {
 		return err
 	}
-	dbNew, err := cdb.NewGoLevelDB("state.new", dataDir)
+	dbNew, err = cdb.NewGoLevelDB("state.new", dataDir)
 	if err != nil {
 		return err
 	}
@@ -66,12 +105,15 @@ func PruneStateDB(dataDir string) error {
 	}
 
 	// Remove old db and rename new db
+	closedOld = true
 	if err := dbOld.Close(); err != nil {
 		return err
 	}
+	closedNew = true
 	if err := dbNew.Close(); err != nil {
 		return err
 	}
+	swapping = true
 	if err := os.RemoveAll(filepath.Join(dataDir, "state.db")); err != nil {
 		return err
 	}

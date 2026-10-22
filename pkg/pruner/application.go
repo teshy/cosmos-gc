@@ -2,6 +2,7 @@ package pruner
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,7 +17,7 @@ import (
 	"github.com/cosmos/iavl"
 )
 
-func PruneApplicationDB(dataDir string) error {
+func PruneApplicationDB(dataDir string) (retErr error) {
 	// Open old db (if it exists)
 	if _, err := os.Stat(filepath.Join(dataDir, "application.db")); os.IsNotExist(err) {
 		return fmt.Errorf("application.db does not exist in %s", dataDir)
@@ -25,6 +26,44 @@ func PruneApplicationDB(dataDir string) error {
 	if err != nil {
 		return err
 	}
+
+	// On any error return, close what was opened and remove the half-written new DB, so the source
+	// stays unlocked and untouched. The success path below closes both itself; the closed flags keep
+	// this from closing twice. Once the old DB is about to be removed (swapping) the new DB may be
+	// the only complete copy, so it is left in place from there on. The original error is returned
+	// (joined with any cleanup error).
+	var (
+		cdbNew    *cdb.GoLevelDB
+		closedOld bool
+		closedNew bool
+		swapping  bool
+	)
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		errs := []error{retErr}
+		if !closedOld {
+			if err := cdbOld.Close(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if cdbNew != nil {
+			if !closedNew {
+				if err := cdbNew.Close(); err != nil {
+					errs = append(errs, err)
+				}
+			}
+			if !swapping {
+				if err := os.RemoveAll(filepath.Join(dataDir, "application.new.db")); err != nil {
+					errs = append(errs, err)
+				}
+			}
+		}
+		if len(errs) > 1 {
+			retErr = errors.Join(errs...)
+		}
+	}()
 
 	// Get latest height
 	latestHeight := rootmulti.GetLatestVersion(cdbOld)
@@ -56,7 +95,7 @@ func PruneApplicationDB(dataDir string) error {
 	if err := os.RemoveAll(filepath.Join(dataDir, "application.new.db")); err != nil {
 		return err
 	}
-	cdbNew, err := cdb.NewGoLevelDB("application.new", dataDir, nil)
+	cdbNew, err = cdb.NewGoLevelDB("application.new", dataDir, nil)
 	if err != nil {
 		return err
 	}
@@ -84,6 +123,7 @@ func PruneApplicationDB(dataDir string) error {
 		kvStoreNew := storeNew.GetCommitKVStore(storeKey)
 		inp, err := kvStoreNew.(*storeiavl.Store).Import(latestHeight)
 		if err != nil {
+			exp.Close()
 			return err
 		}
 		for {
@@ -92,10 +132,14 @@ func PruneApplicationDB(dataDir string) error {
 				break
 			}
 			if err := inp.Add(node); err != nil {
+				inp.Close()
+				exp.Close()
 				return err
 			}
 		}
 		if err := inp.Commit(); err != nil {
+			inp.Close()
+			exp.Close()
 			return err
 		}
 	}
@@ -113,12 +157,15 @@ func PruneApplicationDB(dataDir string) error {
 	cdbNew.Set([]byte("s/"+fmt.Sprint(latestHeight)), val)
 
 	// Remove old db and rename new db
+	closedOld = true
 	if err := cdbOld.Close(); err != nil {
 		return err
 	}
+	closedNew = true
 	if err := cdbNew.Close(); err != nil {
 		return err
 	}
+	swapping = true
 	if err := os.RemoveAll(filepath.Join(dataDir, "application.db")); err != nil {
 		return err
 	}
